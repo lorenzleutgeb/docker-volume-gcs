@@ -19,7 +19,6 @@ package main
 import (
 	"bufio"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -32,26 +31,11 @@ import (
 	plugin "github.com/calavera/dkvolume"
 )
 
-const (
-	// Short name of this plugin.
-	id = "gcs"
-
-	// Socket address by convention. Docker will look there, so
-	// this needs to be in sync with upstream.
-	socketAddress = "/run/docker/plugins/gcs.sock"
-)
+// Socket address by convention. Docker will look there, so
+// this needs to be in sync with upstream.
+const socketAddress = "/run/docker/plugins/gcs.sock"
 
 var (
-	// The path where volume plugins usually put their files.
-	defaultRoot = filepath.Join(plugin.DefaultDockerRootDirectory, id)
-
-	// Each mounted bucket gets it's own subdirectory below root.
-	root = flag.String("root", defaultRoot, "Root directory for all mountpoints of this plugin.")
-
-	// Credentials for Google Cloud as JSON Web Token. Primary use case are Service Accounts.
-	// See https://developers.google.com/console/help/new/#serviceaccounts
-	jwt = flag.String("jwt", "", "JSON Web Token to use for authentication")
-
 	errDaemonDirty   = errors.New("gcsfuse did not exit cleanly")
 	errUnknownVolume = errors.New("unknwon volume, no gcfsfuse instance found")
 	errZombie        = errors.New("found gcfsfuse instance where there should be none")
@@ -65,94 +49,56 @@ func (e errBadRead) Error() string {
 	return fmt.Sprintf("failed to read from gcfsfuse, caused by: %s", e.cause.Error())
 }
 
-// daemon is a gcsfuse process that owns a bucket.
-type daemon struct {
-	*exec.Cmd
-	refs int
-}
-
-// driver wraps multiple daemons, all spawned off the same jwt and root
+// driver wraps multiple gcsfuse processes
 type driver struct {
 	*sync.Mutex
-	jwt, root string
 
-	// Maps bucket to the daemon that owns the bucket.
-	daemons map[string]*daemon
+	// Maps bucket to the gcfsfuse command that owns the bucket.
+	cmds map[string]*exec.Cmd
 }
+
+var root = os.Args[len(os.Args)-1]
 
 func init() {
 	if _, err := exec.LookPath("gcsfuse"); err != nil {
-		panic(err)
+		log.Fatal("Could not find gcsfuse.")
 	}
+	log.SetFlags(log.Lmicroseconds)
 }
 
 func main() {
-	flag.Parse()
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n", os.Args[0])
-		flag.PrintDefaults()
-	}
-
 	d := driver{
-		Mutex:   new(sync.Mutex),
-		jwt:     *jwt,
-		root:    *root,
-		daemons: make(map[string]*daemon),
+		Mutex: new(sync.Mutex),
+		cmds:  make(map[string]*exec.Cmd),
 	}
 
 	h := plugin.NewHandler(d)
-	log.Printf("Listening on %s\n", socketAddress)
+	log.Printf("Listening on %s with mount target %s\n", socketAddress, root)
 	log.Println(h.ServeUnix("root", socketAddress))
-}
-
-func (d driver) Create(r plugin.Request) plugin.Response {
-	d.Lock()
-	defer d.Unlock()
-
-	dmn := d.daemons[r.Name]
-
-	if dmn != nil {
-		// There's a daemon that was never called, we're set!
-		if dmn.ProcessState == nil || dmn.refs > 0 {
-			return plugin.Response{}
-		}
-		return bail(errZombie)
-	}
-
-	mnt := d.mountpoint(r.Name)
-
-	if err := os.MkdirAll(mnt, os.ModeTemporary); err != nil {
-		return bail(err)
-	}
-
-	var args []string
-	if d.jwt != "" {
-		args = []string{"--key-file", d.jwt}
-	}
-
-	cmd := exec.Command("gcsfuse", append(args, r.Name, mnt)...)
-
-	d.daemons[r.Name] = &daemon{cmd, 0}
-
-	return plugin.Response{}
 }
 
 func (d driver) Mount(r plugin.Request) plugin.Response {
 	d.Lock()
 	defer d.Unlock()
 
-	daemon := d.daemons[r.Name]
+	b := d.bucket(r.Name)
 
-	if daemon == nil {
-		return bail(errUnknownVolume)
+	daemon := d.cmds[b]
+
+	if daemon != nil {
+		if daemon.ProcessState != nil && daemon.ProcessState.Exited() {
+			return bail(errZombie)
+		}
+		return plugin.Response{}
 	}
 
-	if daemon.ProcessState != nil && daemon.ProcessState.Exited() {
-		return bail(errZombie)
+	mnt := d.mountpoint(b)
+
+	if err := os.MkdirAll(mnt, os.ModeTemporary); err != nil {
+		return bail(err)
 	}
 
-	daemon.refs++
-
+	daemon = exec.Command("gcsfuse", append(os.Args[1:len(os.Args)-1], b, mnt)...)
 	daemon.Stdout = os.Stdout
 	rc, err := daemon.StderrPipe()
 	if err != nil {
@@ -172,40 +118,46 @@ func (d driver) Mount(r plugin.Request) plugin.Response {
 		return plugin.Response{Err: "Unexpected output from gcsfuse: \"" + l + "\""}
 	}
 
+	d.cmds[b] = daemon
+
 	go io.Copy(os.Stderr, rc)
 
 	return plugin.Response{Mountpoint: d.mountpoint(r.Name)}
 }
 
-func (d driver) Unmount(r plugin.Request) plugin.Response {
+func (d driver) Remove(r plugin.Request) plugin.Response {
 	d.Lock()
 	defer d.Unlock()
 
-	daemon := d.daemons[r.Name]
+	b := d.bucket(r.Name)
+
+	daemon := d.cmds[b]
 
 	if daemon == nil {
-		return bail(errUnknownVolume)
+		log.Printf("Doing nothing when asked to remove volume for %s ...", r.Name)
+		return plugin.Response{}
 	}
 
+	log.Printf("Interrupting gcsfuse %s", b)
 	daemon.Process.Signal(os.Interrupt)
 	ps, err := daemon.Process.Wait()
 	if err != nil {
+		log.Printf("Waiting for gcsfuse %s errored, returning error.", b)
 		return bail(err)
 	}
 	if !ps.Success() {
+		log.Printf("gcsfuse %s exited dirty, returning error.", b)
 		return bail(errDaemonDirty)
-	}
-
-	daemon.refs--
-
-	if daemon.refs == 0 {
-		delete(d.daemons, r.Name)
 	}
 
 	return plugin.Response{}
 }
 
-func (d driver) Remove(r plugin.Request) plugin.Response {
+func (d driver) Create(r plugin.Request) plugin.Response {
+	return plugin.Response{}
+}
+
+func (d driver) Unmount(r plugin.Request) plugin.Response {
 	return plugin.Response{}
 }
 
@@ -214,7 +166,15 @@ func (d driver) Path(r plugin.Request) plugin.Response {
 }
 
 func (d driver) mountpoint(name string) string {
-	return filepath.Join(d.root, name)
+	return filepath.Join(root, name)
+}
+
+func (d driver) bucket(name string) string {
+	i := strings.Index(name, "/")
+	if i == -1 {
+		return name
+	}
+	return name[0:i]
 }
 
 // bail is just a shorthand for wrapping an error inside a plugin.Reponse

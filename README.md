@@ -11,7 +11,14 @@ container as follows:
 $ docker run -ti -v $bucket:/data --volume-driver=gcs ubuntu
 ````
 
-The plugin will do reference counting on the mounted buckets and mount/unmount them as needed.
+or create the volume with
+
+````bash
+# $object is a full GCS object, like $bucket/$object
+$ docker volume create --driver=gcs --name=$object
+# or to mount a whole bucket, just specify it's name
+$ docker volume create --driver=gcs --name=$bucket
+````
 
 ## Installation
 
@@ -21,22 +28,21 @@ $ go get github.com/coduno/gcs-docker-volume
 
 ## Invocation
 
-If you are running this on Google Compute Engine, `gcsfuse` will automatically fall back to default
-credentials so you are good to go with:
-
 ````bash
-$ sudo gcs-docker-volume
+$ gcs-docker-volume [gcsfuse options] ROOT
 ````
 
-Otherwise, you will need to point to a JSON Web Token obtained from the Google Developers Console
-to gain authorization using a Service Account:
+The only argument for the plugin is the root directory to used for mounts. It is mandatory
+and must be the last argument.
+
+An example invocation would be
 
 ````bash
-$ sudo gcs-docker-volume -jwt .../path/to/service-account.json
+$ sudo gcs-docker-volume --key-file service-account.json --uid $UID --gid $GID --implicit-dirs /var/lib/docker/volumes/gcs
 ````
 
-You can adjust the root directory for all mount points as follows:
+## Known issues
 
-````bash
-$ sudo gcs-docker-volume -root .../path/to/mountpoints
-````
+Currently, `gcs-docker-volume` must be run as root user, because `/run/docker/plugins` is usually owned by
+root and it needs to create it's socket there. `gcsfuse` will complain about being run as root, and you
+should pass `--pid` and `--gid` to make it drop privileges.
