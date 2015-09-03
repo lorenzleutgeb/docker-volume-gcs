@@ -89,7 +89,7 @@ func (d driver) Mount(r plugin.Request) plugin.Response {
 		if daemon.ProcessState != nil && daemon.ProcessState.Exited() {
 			return bail(errZombie)
 		}
-		return plugin.Response{}
+		return plugin.Response{Mountpoint: d.mountpoint(r.Name)}
 	}
 
 	mnt := d.mountpoint(b)
