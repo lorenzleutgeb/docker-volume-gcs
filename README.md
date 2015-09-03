@@ -1,4 +1,4 @@
-# gcs-docker-volume
+# docker-volume-gcs
 
 This is a Docker volume plugin that uses [`gcsfuse`](https://github.com/googlecloudplatform/gcsfuse) to
 provision Google Cloud Storage buckets as Docker volumes.
@@ -23,13 +23,13 @@ $ docker volume create --driver=gcs --name=$bucket
 ## Installation
 
 ````bash
-$ go get github.com/coduno/gcs-docker-volume
+$ go get github.com/coduno/docker-volume-gcs
 ````
 
 ## Invocation
 
 ````bash
-$ gcs-docker-volume [gcsfuse options] ROOT
+$ docker-volume-gcs [gcsfuse options] ROOT
 ````
 
 The only argument for the plugin is the root directory to used for mounts. It is mandatory
@@ -38,11 +38,11 @@ and must be the last argument.
 An example invocation would be
 
 ````bash
-$ sudo gcs-docker-volume --key-file service-account.json --uid $UID --gid $GID --implicit-dirs /var/lib/docker/volumes/gcs
+$ sudo docker-volume-gcs --key-file service-account.json --uid $UID --gid $GID --implicit-dirs /var/lib/docker/volumes/gcs
 ````
 
 ## Known issues
 
-Currently, `gcs-docker-volume` must be run as root user, because `/run/docker/plugins` is usually owned by
+Currently, `docker-volume-gcs` must be run as root user, because `/run/docker/plugins` is usually owned by
 root and it needs to create it's socket there. `gcsfuse` will complain about being run as root, and you
-should pass `--pid` and `--gid` to make it drop privileges.
+should pass `--pid` and `--gid` to avoid having everything owned by root.
