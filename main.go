@@ -54,7 +54,7 @@ type driver struct {
 	*sync.Mutex
 
 	// Maps bucket to the gcfsfuse command that owns the bucket.
-	cmds map[string]*exec.Cmd
+	cmds map[string]exec.Cmd
 }
 
 var root = os.Args[len(os.Args)-1]
@@ -69,7 +69,7 @@ func init() {
 func main() {
 	d := driver{
 		Mutex: new(sync.Mutex),
-		cmds:  make(map[string]*exec.Cmd),
+		cmds:  make(map[string]exec.Cmd),
 	}
 
 	h := plugin.NewHandler(d)
@@ -83,9 +83,9 @@ func (d driver) Mount(r plugin.Request) plugin.Response {
 
 	b := d.bucket(r.Name)
 
-	daemon := d.cmds[b]
+	daemon, ok := d.cmds[b]
 
-	if daemon != nil {
+	if ok {
 		if daemon.ProcessState != nil && daemon.ProcessState.Exited() {
 			return bail(errZombie)
 		}
@@ -98,7 +98,7 @@ func (d driver) Mount(r plugin.Request) plugin.Response {
 		return bail(err)
 	}
 
-	daemon = exec.Command("gcsfuse", append(os.Args[1:len(os.Args)-1], b, mnt)...)
+	daemon = *exec.Command("gcsfuse", append(os.Args[1:len(os.Args)-1], b, mnt)...)
 	daemon.Stdout = os.Stdout
 	rc, err := daemon.StderrPipe()
 	if err != nil {
@@ -131,9 +131,9 @@ func (d driver) Remove(r plugin.Request) plugin.Response {
 
 	b := d.bucket(r.Name)
 
-	daemon := d.cmds[b]
+	daemon, ok := d.cmds[b]
 
-	if daemon == nil {
+	if !ok {
 		log.Printf("Doing nothing when asked to remove volume for %s ...", r.Name)
 		return plugin.Response{}
 	}
