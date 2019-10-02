@@ -14,7 +14,7 @@ $ docker run -ti -v $bucket:/data --volume-driver=gcs ubuntu
 or create the volume with
 
 ````bash
-# to mount a specific object, use $bucket/$object
+# to mount a specific object, use ${bucket_name}/${object_name}
 $ docker volume create --driver=gcs --name=${bucket_name}/${object_name}
 # or to mount a whole bucket, just specify it's name
 $ docker volume create --driver=gcs --name=${bucket_name}
