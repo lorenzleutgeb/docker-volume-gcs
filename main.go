@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -28,7 +29,7 @@ import (
 	"strings"
 	"sync"
 
-	plugin "github.com/calavera/dkvolume"
+        "github.com/docker/go-plugins-helpers/volume"
 )
 
 // Socket address by convention. Docker will look there, so
@@ -39,6 +40,7 @@ var (
 	errDaemonDirty   = errors.New("gcsfuse did not exit cleanly")
 	errUnknownVolume = errors.New("unknwon volume, no gcfsfuse instance found")
 	errZombie        = errors.New("found gcfsfuse instance where there should be none")
+
 )
 
 type errBadRead struct {
@@ -48,6 +50,15 @@ type errBadRead struct {
 func (e errBadRead) Error() string {
 	return fmt.Sprintf("failed to read from gcfsfuse, caused by: %s", e.cause.Error())
 }
+
+type errUnexpectedOutput struct {
+	output string
+}
+
+func (e errUnexpectedOutput) Error() string {
+	return fmt.Sprintf("unexpected output from gcfsfuse: %s", e.output)
+}
+
 
 // driver wraps multiple gcsfuse processes
 type driver struct {
@@ -72,12 +83,12 @@ func main() {
 		cmds:  make(map[string]exec.Cmd),
 	}
 
-	h := plugin.NewHandler(d)
+	h := volume.NewHandler(d)
 	log.Printf("Listening on %s with mount target %s\n", socketAddress, root)
-	log.Println(h.ServeUnix("root", socketAddress))
+	log.Println(h.ServeUnix(socketAddress, 0))
 }
 
-func (d driver) Mount(r plugin.Request) plugin.Response {
+func (d driver) Mount(r *volume.MountRequest) (*volume.MountResponse, error) {
 	d.Lock()
 	defer d.Unlock()
 
@@ -87,45 +98,45 @@ func (d driver) Mount(r plugin.Request) plugin.Response {
 
 	if ok {
 		if daemon.ProcessState != nil && daemon.ProcessState.Exited() {
-			return bail(errZombie)
+			return nil, errZombie
 		}
-		return plugin.Response{Mountpoint: d.mountpoint(r.Name)}
+		return &volume.MountResponse{Mountpoint: d.mountpoint(r.Name)}, nil
 	}
 
 	mnt := d.mountpoint(b)
 
 	if err := os.MkdirAll(mnt, os.ModeTemporary); err != nil {
-		return bail(err)
+		return nil, err
 	}
 
 	daemon = *exec.Command("gcsfuse", append(os.Args[1:len(os.Args)-1], b, mnt)...)
 	daemon.Stdout = os.Stdout
 	rc, err := daemon.StderrPipe()
 	if err != nil {
-		return bail(errBadRead{err})
+		return nil, errBadRead{err}
 	}
 
 	if err := daemon.Start(); err != nil {
-		return bail(err)
+		return nil, err
 	}
 
 	l, err := bufio.NewReader(io.TeeReader(rc, os.Stderr)).ReadString(byte('\n'))
 	if err != nil {
-		return bail(errBadRead{err})
+		return nil, errBadRead{err}
 	}
 
 	if !strings.HasSuffix(l, "File system has been successfully mounted.\n") {
-		return plugin.Response{Err: "Unexpected output from gcsfuse: \"" + l + "\""}
+		return nil, errUnexpectedOutput{output: l}
 	}
 
 	d.cmds[b] = daemon
 
 	go io.Copy(os.Stderr, rc)
 
-	return plugin.Response{Mountpoint: d.mountpoint(r.Name)}
+	return &volume.MountResponse{Mountpoint: d.mountpoint(r.Name)}, nil
 }
 
-func (d driver) Remove(r plugin.Request) plugin.Response {
+func (d driver) Remove(r *volume.RemoveRequest) error {
 	d.Lock()
 	defer d.Unlock()
 
@@ -135,7 +146,7 @@ func (d driver) Remove(r plugin.Request) plugin.Response {
 
 	if !ok {
 		log.Printf("Doing nothing when asked to remove volume for %s ...", r.Name)
-		return plugin.Response{}
+		return nil
 	}
 
 	log.Printf("Interrupting gcsfuse %s", b)
@@ -143,26 +154,58 @@ func (d driver) Remove(r plugin.Request) plugin.Response {
 	ps, err := daemon.Process.Wait()
 	if err != nil {
 		log.Printf("Waiting for gcsfuse %s errored, returning error.", b)
-		return bail(err)
+		return err
 	}
 	if !ps.Success() {
 		log.Printf("gcsfuse %s exited dirty, returning error.", b)
-		return bail(errDaemonDirty)
+		return errDaemonDirty
 	}
 
-	return plugin.Response{}
+	return nil
 }
 
-func (d driver) Create(r plugin.Request) plugin.Response {
-	return plugin.Response{}
+func (d driver) Get(r *volume.GetRequest) (*volume.GetResponse, error) {
+	d.Lock()
+	defer d.Unlock()
+
+	return &volume.GetResponse{
+		Volume: &volume.Volume{
+			Name: r.Name,
+			Mountpoint: d.mountpoint(r.Name),
+		},
+	}, nil
 }
 
-func (d driver) Unmount(r plugin.Request) plugin.Response {
-	return plugin.Response{}
+func (d driver) List() (*volume.ListResponse, error) {
+	d.Lock()
+	defer d.Unlock()
+
+	var volumes []*volume.Volume
+	files, err := ioutil.ReadDir(root)
+
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range files {
+		if entry.IsDir() {
+			volumes = append(volumes, &volume.Volume{Name: entry.Name(), Mountpoint: d.mountpoint(entry.Name())})
+		}
+	}
+
+	return &volume.ListResponse{Volumes: volumes}, nil
 }
 
-func (d driver) Path(r plugin.Request) plugin.Response {
-	return plugin.Response{Mountpoint: d.mountpoint(r.Name)}
+func (d driver) Path(r *volume.PathRequest) (*volume.PathResponse, error) {
+	return &volume.PathResponse{Mountpoint: d.mountpoint(r.Name)}, nil
+}
+
+func (d driver) Create(r *volume.CreateRequest) error {
+	return nil
+}
+
+func (d driver) Unmount(r *volume.UnmountRequest) error {
+	return nil
 }
 
 func (d driver) mountpoint(name string) string {
@@ -177,7 +220,8 @@ func (d driver) bucket(name string) string {
 	return name[0:i]
 }
 
-// bail is just a shorthand for wrapping an error inside a plugin.Reponse
-func bail(err error) plugin.Response {
-	return plugin.Response{Err: err.Error()}
+func (d driver) Capabilities() *volume.CapabilitiesResponse {
+	return &volume.CapabilitiesResponse{
+		Capabilities: volume.Capability{Scope: "global"},
+	}
 }
