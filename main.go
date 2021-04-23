@@ -1,4 +1,4 @@
-// Copyright 2015 Lorenz Leutgeb <lorenz.leutgeb@cod.uno>
+// Copyright  Lorenz Leutgeb <lorenz@leutgeb.xyz>
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
