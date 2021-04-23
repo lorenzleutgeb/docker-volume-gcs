@@ -1,3 +1,8 @@
+
+⚠️ This project is not maintained and comes without any warranties. Forks and contributions are welcome.
+
+---
+
 # docker-volume-gcs
 
 This is a Docker volume plugin that uses [`gcsfuse`](https://github.com/googlecloudplatform/gcsfuse) to
